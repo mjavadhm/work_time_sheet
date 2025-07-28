@@ -12,19 +12,24 @@ from dotenv import load_dotenv
 import jdatetime
 from datetime import datetime
 
-# --- 1. Initial Setup ---
+
+import zoneinfo
+
+from aiogram.client.default import DefaultBotProperties
+
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
-CREDENTIALS_FILE = 'starry-center-456009-a7-90082ba64a87.json' # Your JSON file name
+CREDENTIALS_FILE = 'starry-center-456009-a7-90082ba64a87.json' 
 HOURLY_RATE = 70000
 
 if not BOT_TOKEN or not SPREADSHEET_ID:
     raise ValueError("BOT_TOKEN and SPREADSHEET_ID must be set in the .env file.")
 
-# --- 2. Google Sheets Connection ---
+
 try:
     gc = gspread.service_account(filename=CREDENTIALS_FILE)
     worksheet = gc.open_by_key(SPREADSHEET_ID).sheet1
@@ -33,16 +38,25 @@ except Exception as e:
     logging.error(f"Failed to connect to Google Sheets: {e}")
     exit()
 
-# --- 3. Helper Functions ---
+
+
 def get_current_jalali_datetime():
-    """Returns current Jalali date, 12-hour format time, and English weekday."""
-    now_gregorian = datetime.now()
+    """Returns current Jalali date, Tehran time, and Persian weekday."""
+    
+    tehran_tz = zoneinfo.ZoneInfo("Asia/Tehran")
+    now_gregorian = datetime.now(tehran_tz)
+    
+    
     j_now = jdatetime.datetime.fromgregorian(datetime=now_gregorian)
     date_str = j_now.strftime('%Y/%m/%d')
     time_str = now_gregorian.strftime("%I:%M:%S %p")
-    weekday_map = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-    gregorian_weekday = now_gregorian.weekday()
-    weekday_str = weekday_map[gregorian_weekday]
+    
+    
+    
+    persian_weekday_map = ["شنبه", "یکشنبه", "دوشنبه", "سه‌شنبه", "چهارشنبه", "پنج‌شنبه", "جمعه"]
+    jalali_weekday_index = j_now.weekday()
+    weekday_str = persian_weekday_map[jalali_weekday_index]
+    
     return date_str, time_str, weekday_str
 
 def get_last_day_of_jalali_month(year, month):
@@ -54,20 +68,14 @@ def get_last_day_of_jalali_month(year, month):
     elif month == 12:
         return 29 if not jdatetime.date(year, 1, 1).isleap() else 30
     return 0
-    
-# ---- [تغییر کلیدی] ----
-# این تابع اولین ردیف خالی در ستون اول (تاریخ) را پیدا می‌کند
-# این کار از نوشتن اطلاعات در زیر جدول اصلی جلوگیری می‌کند
+
 def find_first_empty_row(sheet):
     """Finds the first empty row in column A, starting from row 2."""
-    all_dates = sheet.col_values(1) # Get all values from column A
-    row_number = 2 # Start checking from row 2 (to skip header)
-    for date in all_dates[1:]: # Iterate through dates, skipping header
-        if not date: # If the cell is empty
-            return row_number
-        row_number += 1
-    return len(all_dates) + 1 # If no empty row is found, return the next row number
-
+    all_dates = sheet.col_values(1)
+    for i, date in enumerate(all_dates[1:], start=2):
+        if not date:
+            return i
+    return len(all_dates) + 1
 
 def calculate_monthly_stats(sheet, j_now, hourly_rate):
     """Calculates comprehensive monthly stats from the sheet."""
@@ -78,8 +86,6 @@ def calculate_monthly_stats(sheet, j_now, hourly_rate):
     current_jyear = j_now.year
     current_jday = j_now.day
 
-    # This function reads the duration from the sheet (column E, index 4)
-    # So it will work correctly with sheet-calculated durations
     for record in all_records[1:]:
         if len(record) >= 5 and record[0] and record[4]:
             try:
@@ -125,7 +131,7 @@ def calculate_monthly_stats(sheet, j_now, hourly_rate):
         "projected_salary": int(projected_salary)
     }
 
-# --- 4. FSM and Keyboard Setup ---
+
 class ActivityState(StatesGroup):
     waiting_for_activity = State()
 
@@ -134,7 +140,7 @@ main_keyboard = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-# --- 5. Handlers (aiogram 3.x) ---
+
 router = Router()
 
 @router.message(CommandStart())
@@ -153,65 +159,58 @@ async def cmd_stats(message: types.Message):
         stats = calculate_monthly_stats(worksheet, jnow, HOURLY_RATE)
         
         stats_message = (
-            f"📊 Stats for {month_name}\n\n"
-            f"🕒 Total Work Hours: {stats['total_hours']}\n"
-            f"💵 Current Salary: ${stats['current_salary']:,}\n\n"
-            f"📈 Expected Salary (8hr/day): ${stats['expected_salary']:,}\n"
-            f"🔮 Projected Month Salary: ${stats['projected_salary']:,}"
+            f"📊 **stats of {month_name}**\n\n"
+            f"🕒 **total hours:** `{stats['total_hours']}`\n"
+            f"💵 **current salary:** `{stats['current_salary']:,} TMN`\n\n"
+            f"📈 **expected salary(8 hours a day):** `{stats['expected_salary']:,} TMN`\n"
+            f"🔮 **projected salary:** `{stats['projected_salary']:,} TMN`"
         )
-        await message.answer(stats_message, parse_mode='Markdown')
+        await message.answer(stats_message)
     except Exception as e:
-        logging.error(f"Error in cmd_stats: {e}")
+        logging.error(f"Error in cmd_stats: {e}", exc_info=True)
         await message.answer("An error occurred while fetching stats.")
 
 @router.message(F.text == "⏰ Check In")
 async def handle_check_in(message: types.Message):
-    # ---- [تغییر کلیدی] ----
-    # به جای append_row، از تابع جدید برای پیدا کردن ردیف خالی استفاده می‌کنیم
     try:
         row_to_update = find_first_empty_row(worksheet)
         date_str, time_str, weekday_str = get_current_jalali_datetime()
         
-        # اطلاعات در ردیف مشخص شده ثبت می‌شوند
         new_row_data = [date_str, weekday_str, time_str]
         worksheet.update(f'A{row_to_update}:C{row_to_update}', [new_row_data])
         
         await message.answer(f"✅ Check-in recorded at {time_str}.")
     except Exception as e:
-        logging.error(f"Error in handle_check_in: {e}")
+        logging.error(f"Error in handle_check_in: {e}", exc_info=True)
         await message.answer("Failed to record check-in. Please check the connection with Google Sheets.")
-
 
 @router.message(F.text == "🏁 Check Out")
 async def handle_check_out(message: types.Message, state: FSMContext):
-    all_records = worksheet.get_all_values()
-    row_to_update_index = -1
-    
-    # Find the last row with a check-in but no check-out
-    for i in range(len(all_records) - 1, 0, -1):
-        row = all_records[i]
-        # Check if row has a check-in (column C) but is missing a check-out (column D)
-
-    if len(row) > 2 and row[2] and (len(row) < 4 or not row[3]):
-        row_to_update_index = i
+    try:
+        all_records = worksheet.get_all_values()
+        row_to_update_index = -1
         
+        for i in range(len(all_records) - 1, 0, -1):
+            row = all_records[i]
+            if len(row) > 2 and row[2] and (len(row) < 4 or not row[3]):
+                row_to_update_index = i
+                break
+                
+        if row_to_update_index == -1:
+            await message.answer("⚠️ You need to check in first!")
+            return
             
-    if row_to_update_index == -1:
-        await message.answer("⚠️ You need to check in first!")
-        return
+        row_number = row_to_update_index + 1
+        _, time_str, _ = get_current_jalali_datetime()
+
+        worksheet.update_cell(row_number, 4, time_str)
         
-    row_number = row_to_update_index + 1
-    _, time_str, _ = get_current_jalali_datetime()
-
-    # ---- [تغییر کلیدی] ----
-    # فقط سلول ساعت خروج (ستون چهارم) آپدیت می‌شود
-    worksheet.update_cell(row_number, 4, time_str)
-    
-    # محاسبه مدت زمان حذف شده است، چون شیت خودش این کار را انجام می‌دهد
-
-    await state.update_data(row_number=row_number)
-    await state.set_state(ActivityState.waiting_for_activity)
-    await message.answer(f"✅ Check-out recorded at {time_str}.\n\nPlease enter your activity for this session (or type skip).")
+        await state.update_data(row_number=row_number)
+        await state.set_state(ActivityState.waiting_for_activity)
+        await message.answer(f"✅ Check-out recorded at {time_str}.\n\nPlease enter your activity for this session (or type `skip`).")
+    except Exception as e:
+        logging.error(f"Error in handle_check_out: {e}", exc_info=True)
+        await message.answer("An error occurred during check-out.")
 
 
 @router.message(ActivityState.waiting_for_activity)
@@ -219,31 +218,42 @@ async def process_activity(message: types.Message, state: FSMContext):
     data = await state.get_data()
     row_number = data.get("row_number")
     
-    # ---- [تغییر کلیدی] ----
-    # منطق این بخش برای خوانایی بهتر شده است
     activity = message.text
     if activity and activity.lower().strip() != 'skip':
-        worksheet.update_cell(row_number, 6, activity) # Update activity in column F
+        worksheet.update_cell(row_number, 6, activity)
         await message.answer("✅ Activity recorded.", reply_markup=main_keyboard)
     else:
         await message.answer("👍 Activity skipped.", reply_markup=main_keyboard)
 
     await state.clear()
-    # Show updated stats automatically after finishing a session
     await cmd_stats(message)
 
-# --- 6. Main Execution ---
+
 async def main():
-    bot = Bot(token=BOT_TOKEN)
+    logging.info("Setting up Bot and Dispatcher...")
+    
+    bot = Bot(
+        token=BOT_TOKEN, 
+        default=DefaultBotProperties(parse_mode='Markdown')
+    )
+    
     storage = MemoryStorage()
     dp = Dispatcher(storage=storage)
     dp.include_router(router)
     
+    logging.info("Deleting any existing webhook...")
     await bot.delete_webhook(drop_pending_updates=True)
+    
+    logging.info(">>> Bot polling is starting now...")
     await dp.start_polling(bot)
 
-if __name__ == "main":
+if __name__ == "__main__":
+    logging.info("Attempting to run the bot...")
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logging.info("Bot stopped by admin.")
+        logging.info("Bot stopped by admin (Ctrl+C).")
+    except Exception as e:
+        logging.error(f"An unexpected error occurred which stopped the bot: {e}", exc_info=True)
+    finally:
+        logging.info("Bot has been shut down.")
