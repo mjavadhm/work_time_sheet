@@ -1,4 +1,3 @@
-
 import os
 import logging
 import asyncio
@@ -20,12 +19,12 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 CREDENTIALS_FILE = 'starry-center-456009-a7-90082ba64a87.json' # Your JSON file name
-HOURLY_RATE = 70000 # Hourly rate from your latest code
+HOURLY_RATE = 70000
 
 if not BOT_TOKEN or not SPREADSHEET_ID:
     raise ValueError("BOT_TOKEN and SPREADSHEET_ID must be set in the .env file.")
 
-# --- 2. Google Sheets Connection (Modern Method) ---
+# --- 2. Google Sheets Connection ---
 try:
     gc = gspread.service_account(filename=CREDENTIALS_FILE)
     worksheet = gc.open_by_key(SPREADSHEET_ID).sheet1
@@ -34,7 +33,7 @@ except Exception as e:
     logging.error(f"Failed to connect to Google Sheets: {e}")
     exit()
 
-# --- 3. Helper Functions (Preserved from your code) ---
+# --- 3. Helper Functions ---
 def get_current_jalali_datetime():
     """Returns current Jalali date, 12-hour format time, and English weekday."""
     now_gregorian = datetime.now()
@@ -42,7 +41,6 @@ def get_current_jalali_datetime():
     date_str = j_now.strftime('%Y/%m/%d')
     time_str = now_gregorian.strftime("%I:%M:%S %p")
     weekday_map = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-    # jdatetime weekday(): Sat=0, ..., Fri=6. Gregorian: Mon=0, ..., Sun=6
     gregorian_weekday = now_gregorian.weekday()
     weekday_str = weekday_map[gregorian_weekday]
     return date_str, time_str, weekday_str
@@ -56,6 +54,20 @@ def get_last_day_of_jalali_month(year, month):
     elif month == 12:
         return 29 if not jdatetime.date(year, 1, 1).isleap() else 30
     return 0
+    
+# ---- [تغییر کلیدی] ----
+# این تابع اولین ردیف خالی در ستون اول (تاریخ) را پیدا می‌کند
+# این کار از نوشتن اطلاعات در زیر جدول اصلی جلوگیری می‌کند
+def find_first_empty_row(sheet):
+    """Finds the first empty row in column A, starting from row 2."""
+    all_dates = sheet.col_values(1) # Get all values from column A
+    row_number = 2 # Start checking from row 2 (to skip header)
+    for date in all_dates[1:]: # Iterate through dates, skipping header
+        if not date: # If the cell is empty
+            return row_number
+        row_number += 1
+    return len(all_dates) + 1 # If no empty row is found, return the next row number
+
 
 def calculate_monthly_stats(sheet, j_now, hourly_rate):
     """Calculates comprehensive monthly stats from the sheet."""
@@ -66,6 +78,8 @@ def calculate_monthly_stats(sheet, j_now, hourly_rate):
     current_jyear = j_now.year
     current_jday = j_now.day
 
+    # This function reads the duration from the sheet (column E, index 4)
+    # So it will work correctly with sheet-calculated durations
     for record in all_records[1:]:
         if len(record) >= 5 and record[0] and record[4]:
             try:
@@ -83,17 +97,12 @@ def calculate_monthly_stats(sheet, j_now, hourly_rate):
     total_hours_display = f"{int(total_hours):02d}:{int(total_minutes % 60):02d}"
     current_salary = total_hours * hourly_rate
 
-    # Calculate business days (excluding Fridays) until today
     business_days_so_far = 0
     for day in range(1, current_jday + 1):
-        # jdatetime: Friday is weekday 6
         if jdatetime.date(current_jyear, current_jmonth, day).weekday() != 6:
             business_days_so_far += 1
             
-    # Expected salary if worked 8 hours/day on all past business days
     expected_salary = (business_days_so_far * 8) * hourly_rate
-
-    # Calculate projected salary based on average
 
     projected_salary = 0
     if len(worked_days) > 0:
@@ -157,49 +166,67 @@ async def cmd_stats(message: types.Message):
 
 @router.message(F.text == "⏰ Check In")
 async def handle_check_in(message: types.Message):
-    date_str, time_str, weekday_str = get_current_jalali_datetime()
-    new_row = [date_str, weekday_str, time_str, "", "", ""]
-    worksheet.append_row(new_row, value_input_option='USER_ENTERED')
-    await message.answer(f"✅ Check-in recorded at {time_str}.")
+    # ---- [تغییر کلیدی] ----
+    # به جای append_row، از تابع جدید برای پیدا کردن ردیف خالی استفاده می‌کنیم
+    try:
+        row_to_update = find_first_empty_row(worksheet)
+        date_str, time_str, weekday_str = get_current_jalali_datetime()
+        
+        # اطلاعات در ردیف مشخص شده ثبت می‌شوند
+        new_row_data = [date_str, weekday_str, time_str]
+        worksheet.update(f'A{row_to_update}:C{row_to_update}', [new_row_data])
+        
+        await message.answer(f"✅ Check-in recorded at {time_str}.")
+    except Exception as e:
+        logging.error(f"Error in handle_check_in: {e}")
+        await message.answer("Failed to record check-in. Please check the connection with Google Sheets.")
+
 
 @router.message(F.text == "🏁 Check Out")
 async def handle_check_out(message: types.Message, state: FSMContext):
     all_records = worksheet.get_all_values()
     row_to_update_index = -1
+    
+    # Find the last row with a check-in but no check-out
     for i in range(len(all_records) - 1, 0, -1):
-        if len(all_records[i]) > 3 and all_records[i][3] == "":
+        row = all_records[i]
+        # Check if row has a check-in (column C) but is missing a check-out (column D)
+
+    if len(row) > 2 and row[2] and (len(row) < 4 or not row[3]):
             row_to_update_index = i
             break
+            
     if row_to_update_index == -1:
         await message.answer("⚠️ You need to check in first!")
         return
         
     row_number = row_to_update_index + 1
     _, time_str, _ = get_current_jalali_datetime()
-    worksheet.update_cell(row_number, 4, time_str) # Update check-out
 
-    # Calculate and update duration
-    time_in_str = all_records[row_to_update_index][2]
-    FMT = "%I:%M:%S %p"
-    duration = datetime.strptime(time_str, FMT) - datetime.strptime(time_in_str, FMT)
-    duration_str = str(duration).split('.')[0] # Format as HH:MM:SS
-    worksheet.update_cell(row_number, 5, duration_str) # Update total hours
+    # ---- [تغییر کلیدی] ----
+    # فقط سلول ساعت خروج (ستون چهارم) آپدیت می‌شود
+    worksheet.update_cell(row_number, 4, time_str)
     
+    # محاسبه مدت زمان حذف شده است، چون شیت خودش این کار را انجام می‌دهد
+
     await state.update_data(row_number=row_number)
     await state.set_state(ActivityState.waiting_for_activity)
     await message.answer(f"✅ Check-out recorded at {time_str}.\n\nPlease enter your activity for this session (or type skip).")
+
 
 @router.message(ActivityState.waiting_for_activity)
 async def process_activity(message: types.Message, state: FSMContext):
     data = await state.get_data()
     row_number = data.get("row_number")
     
-    if message.text.lower() != 'skip':
-        activity = message.text
-        worksheet.update_cell(row_number, 6, activity)
-        await message.answer("Activity recorded.", reply_markup=main_keyboard)
+    # ---- [تغییر کلیدی] ----
+    # منطق این بخش برای خوانایی بهتر شده است
+    activity = message.text
+    if activity and activity.lower().strip() != 'skip':
+        worksheet.update_cell(row_number, 6, activity) # Update activity in column F
+        await message.answer("✅ Activity recorded.", reply_markup=main_keyboard)
     else:
-        await message.answer("Activity skipped.", reply_markup=main_keyboard)
+        await message.answer("👍 Activity skipped.", reply_markup=main_keyboard)
 
     await state.clear()
     # Show updated stats automatically after finishing a session
