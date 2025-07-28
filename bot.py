@@ -1,353 +1,222 @@
+
 import os
 import logging
-from datetime import datetime
-from pytz import timezone
-from aiogram import Bot, Dispatcher, types
-from aiogram.filters import Command
-from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
+import asyncio
+import gspread
+from aiogram import Bot, Dispatcher, Router, F, types
+from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.storage.memory import MemoryStorage
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
 from dotenv import load_dotenv
 import jdatetime
+from datetime import datetime
 
-# Setup logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# Load environment variables
+# --- 1. Initial Setup ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 load_dotenv()
 
-# Setup bot token and sheet info
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
+CREDENTIALS_FILE = 'starry-center-456009-a7-90082ba64a87.json' # Your JSON file name
+HOURLY_RATE = 70000 # Hourly rate from your latest code
 
-# Setup Iran timezone
-iran_tz = timezone("Asia/Tehran")
+if not BOT_TOKEN or not SPREADSHEET_ID:
+    raise ValueError("BOT_TOKEN and SPREADSHEET_ID must be set in the .env file.")
 
-# Initialize bot and dispatcher with MemoryStorage for FSM
-bot = Bot(token=BOT_TOKEN)
-storage = MemoryStorage()
-dp = Dispatcher(storage=storage, bot=bot)
+# --- 2. Google Sheets Connection (Modern Method) ---
+try:
+    gc = gspread.service_account(filename=CREDENTIALS_FILE)
+    worksheet = gc.open_by_key(SPREADSHEET_ID).sheet1
+    logging.info("Successfully connected to Google Sheets.")
+except Exception as e:
+    logging.error(f"Failed to connect to Google Sheets: {e}")
+    exit()
 
-# Google Sheets setup
-scope = ['https://spreadsheets.google.com/feeds',
-         'https://www.googleapis.com/auth/drive']
+# --- 3. Helper Functions (Preserved from your code) ---
+def get_current_jalali_datetime():
+    """Returns current Jalali date, 12-hour format time, and English weekday."""
+    now_gregorian = datetime.now()
+    j_now = jdatetime.datetime.fromgregorian(datetime=now_gregorian)
+    date_str = j_now.strftime('%Y/%m/%d')
+    time_str = now_gregorian.strftime("%I:%M:%S %p")
+    weekday_map = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    # jdatetime weekday(): Sat=0, ..., Fri=6. Gregorian: Mon=0, ..., Sun=6
+    gregorian_weekday = now_gregorian.weekday()
+    weekday_str = weekday_map[gregorian_weekday]
+    return date_str, time_str, weekday_str
 
-credentials = ServiceAccountCredentials.from_json_keyfile_name(
-    'starry-center-456009-a7-90082ba64a87.json', scope)
-gc = gspread.authorize(credentials)
-
-def get_sheet():
-    sheet = gc.open_by_key(SPREADSHEET_ID)
-    return sheet.sheet1
-
-def get_persian_weekday(date):
-    weekday_map = {
-        0: "دوشنبه",
-        1: "سه‌شنبه",
-        2: "چهارشنبه",
-        3: "پنج‌شنبه",
-        4: "جمعه",
-        5: "شنبه",
-        6: "یکشنبه"
-    }
-    return weekday_map[date.weekday()]
-
-def format_time(time_obj):
-    return time_obj.strftime("%I:%M:%S %p")
-
-def calculate_monthly_stats(sheet, current_month, hourly_rate=70000):
-    all_records = sheet.get_all_values()
-    total_minutes = 0
-    worked_days = set()  # Track unique days worked
-    
-    # Parse records
-    for record in all_records[1:]:  # Skip header row
-        if len(record) >= 5 and record[4] and record[0] and '/' in record[0]:  # Has total hours and valid date
-            try:
-                date_parts = record[0].split('/')
-                if len(date_parts) >= 3:
-                    # Convert the month part to integer
-                    record_year = int(date_parts[0])
-                    record_month = int(date_parts[1])
-                    record_day = int(date_parts[2])
-                    
-                    if record_month == current_month:
-                        
-                        # Add this day to worked days set
-                        worked_days.add(record_day)
-                        
-                        if ':' in record[4]:
-                            time_parts = record[4].split(':')
-                            if len(time_parts) >= 2:
-                                hours = int(time_parts[0])
-                                minutes = int(time_parts[1])
-                                
-                                total_minutes += hours * 60 + minutes
-            except (ValueError, IndexError) as e:
-                logger.error(f"Error parsing record {record}: {e}")
-    
-    # Calculate total hours worked
-    total_hours = total_minutes / 60  # Use floating point for accurate salary calculation
-    total_hours_display = f"{int(total_hours):02d}:{int(total_minutes % 60):02d}"
-    
-    # Calculate current salary
-    current_salary = total_hours * hourly_rate
-    
-    # Calculate expected salary based on 8 hours per workday
-    now = jdatetime.datetime.now()
-    # first_day_of_month = jdatetime.datetime(now.year, current_month, 1)
-    
-    # Get the current day of the month or use the last day if we're calculating for a past month
-    current_day = now.day 
-    
-    
-    # Count business days (excluding Fridays) until today
-    business_days = 0
-    for day in range(1, current_day + 1):
-        date = jdatetime.date(now.year, current_month, day)
-        # Convert to Gregorian to use weekday()
-        g_date = date.togregorian()
-        # In Iran, Friday is the weekend (weekday 4)
-        if g_date.weekday() != 4:  # 4 is Friday
-            business_days += 1
-    
-    
-    # Calculate projected salary based on daily average
-    days_worked = len(worked_days)
-    
-    # Avoid division by zero
-    if days_worked > 0:
-        avg_hours_per_day = total_hours / days_worked
-    else:
-        avg_hours_per_day = 0
-    
-    # Calculate total business days in the month (excluding Fridays)
-    
-    month_length = get_last_day_of_month(now.year, current_month)
-    total_business_days = 0
-    for day in range(1, month_length + 1):
-        date = jdatetime.date(now.year, current_month, day)
-        g_date = date.togregorian()
-        if g_date.weekday() != 4:  
-            total_business_days += 1
-    
-    
-    remainig_days = total_business_days - current_day
-    projected_hours = avg_hours_per_day * remainig_days
-    projected_salary = (projected_hours * hourly_rate) + current_salary
-    expected_hours = remainig_days * 8
-    expected_salary = (expected_hours * hourly_rate) + current_salary
-    
-    return {
-        "total_hours": total_hours_display,
-        "current_salary": current_salary,
-        "expected_salary": expected_salary,
-        "projected_salary": projected_salary
-    }
-    
-    
-    
-def get_last_day_of_month(year, month):
-    # If it's the last month of the year
-    if month == 12:
-        # Esfand has 29 days in normal years, 30 in leap years
-        if jdatetime.date(year, 12, 29).togregorian().year % 4 == 0:
-            return 30
-        else:
-            return 29
-    
-    # For months 1-6, there are 31 days
-    elif 1 <= month <= 6:
+def get_last_day_of_jalali_month(year, month):
+    """Calculates the number of days in a given Jalali month."""
+    if 1 <= month <= 6:
         return 31
-    
-    # For months 7-11, there are 30 days
     elif 7 <= month <= 11:
         return 30
-    
-    # Handle invalid input
-    else:
-        raise ValueError("Month must be between 1 and 12")
-    
-    
-def get_days_in_month(year, month):
-    # Get the first day of the next month
-    if month == 12:
-        next_month = jdatetime.date(year + 1, 1, 1)
-    else:
-        next_month = jdatetime.date(year, month + 1, 1)
-    
-    # Subtract one day to get the last day of the current month
-    last_day = next_month - jdatetime.timedelta(days=1)
-    return last_day.day
+    elif month == 12:
+        return 29 if not jdatetime.date(year, 1, 1).isleap() else 30
+    return 0
 
-
-def calculate_monthly_hours(sheet, current_month):
+def calculate_monthly_stats(sheet, j_now, hourly_rate):
+    """Calculates comprehensive monthly stats from the sheet."""
     all_records = sheet.get_all_values()
     total_minutes = 0
-    
-    for record in all_records[1:]:  # Skip header row
-        if len(record) >= 5 and record[4] and record[0] and '/' in record[0]:  # Has total hours and valid date
+    worked_days = set()
+    current_jmonth = j_now.month
+    current_jyear = j_now.year
+    current_jday = j_now.day
+
+    for record in all_records[1:]:
+        if len(record) >= 5 and record[0] and record[4]:
             try:
                 date_parts = record[0].split('/')
-                if len(date_parts) >= 2:
-                    # Convert the month part to integer
-                    record_month = int(date_parts[1])
-                    if record_month == current_month:
-                        if ':' in record[4]:
-                            time_parts = record[4].split(':')
-                            if len(time_parts) >= 2:
-                                hours = int(time_parts[0])
-                                minutes = int(time_parts[1])
-                                total_minutes += hours * 60 + minutes
-            except (ValueError, IndexError) as e:
-                logger.error(f"Error parsing record {record}: {e}")
-    
-    total_hours = total_minutes // 60
-    remaining_minutes = total_minutes % 60
-    return f"{total_hours:02d}:{remaining_minutes:02d}"
+                record_year, record_month, record_day = map(int, date_parts)
+                if record_year == current_jyear and record_month == current_jmonth:
+                    worked_days.add(record_day)
+                    time_parts = record[4].split(':')
+                    if len(time_parts) >= 2:
+                        total_minutes += int(time_parts[0]) * 60 + int(time_parts[1])
+            except (ValueError, IndexError):
+                continue
 
-def get_keyboard():
-    keyboard = ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="⏰ Check In")],
-            [KeyboardButton(text="🏁 Check Out")]
-        ],
-        resize_keyboard=True
-    )
-    return keyboard
+    total_hours = total_minutes / 60.0
+    total_hours_display = f"{int(total_hours):02d}:{int(total_minutes % 60):02d}"
+    current_salary = total_hours * hourly_rate
 
+    # Calculate business days (excluding Fridays) until today
+    business_days_so_far = 0
+    for day in range(1, current_jday + 1):
+        # jdatetime: Friday is weekday 6
+        if jdatetime.date(current_jyear, current_jmonth, day).weekday() != 6:
+            business_days_so_far += 1
+            
+    # Expected salary if worked 8 hours/day on all past business days
+    expected_salary = (business_days_so_far * 8) * hourly_rate
+
+    # Calculate projected salary based on average
+
+    projected_salary = 0
+    if len(worked_days) > 0:
+        avg_hours_per_day = total_hours / len(worked_days)
+        last_day_of_month = get_last_day_of_jalali_month(current_jyear, current_jmonth)
+        
+        total_business_days_in_month = 0
+        for day in range(1, last_day_of_month + 1):
+            if jdatetime.date(current_jyear, current_jmonth, day).weekday() != 6:
+                total_business_days_in_month += 1
+                
+        remaining_business_days = total_business_days_in_month - business_days_so_far
+        projected_total_hours = total_hours + (avg_hours_per_day * remaining_business_days)
+        projected_salary = projected_total_hours * hourly_rate
+
+    return {
+        "total_hours": total_hours_display,
+        "current_salary": int(current_salary),
+        "expected_salary": int(expected_salary),
+        "projected_salary": int(projected_salary)
+    }
+
+# --- 4. FSM and Keyboard Setup ---
 class ActivityState(StatesGroup):
     waiting_for_activity = State()
 
-@dp.message(Command("start"))
+main_keyboard = ReplyKeyboardMarkup(
+    keyboard=[[KeyboardButton(text="⏰ Check In"), KeyboardButton(text="🏁 Check Out")]],
+    resize_keyboard=True
+)
+
+# --- 5. Handlers (aiogram 3.x) ---
+router = Router()
+
+@router.message(CommandStart())
 async def cmd_start(message: types.Message):
     await message.answer(
-        "Hello! Use the buttons below to record your work hours:",
-        reply_markup=get_keyboard()
+        "Hello! Use the buttons below to record your work hours.",
+        reply_markup=main_keyboard
     )
 
-@dp.message(Command("stats"))
+@router.message(Command("stats"))
 async def cmd_stats(message: types.Message):
-    """Command to get current month statistics"""
+    await message.answer("Calculating monthly stats... please wait.")
     try:
-        sheet = get_sheet()
-        now = datetime.now(iran_tz)
-        jnow = jdatetime.datetime.fromgregorian(datetime=now)
-        
-        monthly_stats = calculate_monthly_stats(sheet, jnow.month)
+        jnow = jdatetime.datetime.now()
+        month_name = jnow.strftime("%B")
+        stats = calculate_monthly_stats(worksheet, jnow, HOURLY_RATE)
         
         stats_message = (
-            f"📊 Monthly Statistics ({jnow.year}/{jnow.month:02d}):\n\n"
-            f"Total Hours: {monthly_stats['total_hours']}\n"
-            f"Current Salary: {int(monthly_stats['current_salary']):,}\n"
-            f"Expected Salary (8hr/day): {int(monthly_stats['expected_salary']):,}\n"
-            f"Projected Month Salary: {int(monthly_stats['projected_salary']):,}"
+            f"📊 Stats for {month_name}\n\n"
+            f"🕒 Total Work Hours: {stats['total_hours']}\n"
+            f"💵 Current Salary: ${stats['current_salary']:,}\n\n"
+            f"📈 Expected Salary (8hr/day): ${stats['expected_salary']:,}\n"
+            f"🔮 Projected Month Salary: ${stats['projected_salary']:,}"
         )
-        await message.answer(stats_message)
+        await message.answer(stats_message, parse_mode='Markdown')
     except Exception as e:
-        logger.error("Error getting monthly stats: %s", e)
-        await message.answer("Error getting statistics. Please try again later.")
-        
-@dp.message(ActivityState.waiting_for_activity)
-async def process_activity(message: types.Message, state: FSMContext):
-    logger.info("Entering process_activity")
-    try:
-        data = await state.get_data()
-        logger.info("FSM data: %s", data)
-        row_number = data.get("row_number")
-        start_time = data.get("start_time")
-        end_time = data.get("end_time")
-        total_hours = data.get("total_hours")
-        
-        if message.text != "skip":
-            activity = message.text
-            sheet = get_sheet()
-            sheet.update_cell(row_number, 6, activity)
-        else:
-            activity = "No activity specified"
-        
-        # Get current month's total hours
-        now = datetime.now(iran_tz)
-        monthly_total = calculate_monthly_hours(sheet, now.month)
-        
-        # Send summary message
-        summary = (
-            f"✅ Session Summary:\n"
-            f"Start Time: {start_time}\n"
-            f"End Time: {end_time}\n"
-            f"Session Duration: {total_hours}\n"
-        )
-        # calculate_monthly_stats(sheet,)
-        await message.answer(summary)
-        
-        logger.info("Activity '%s' recorded in row %s", activity, row_number)
-        await state.clear()
-        await cmd_stats(message)
-    except Exception as e:
-        logger.error("Error processing activity: %s", e)
+        logging.error(f"Error in cmd_stats: {e}")
+        await message.answer("An error occurred while fetching stats.")
 
-@dp.message()
-async def handle_time_logging(message: types.Message, state: FSMContext):
-    now = datetime.now(iran_tz)
-    jdate = jdatetime.datetime.fromgregorian(datetime=now)
-    persian_date = f"{jdate.year}/{str(jdate.month).zfill(2)}/{str(jdate.day).zfill(2)}"
-    current_time = format_time(now)
-    sheet = get_sheet()
+@router.message(F.text == "⏰ Check In")
+async def handle_check_in(message: types.Message):
+    date_str, time_str, weekday_str = get_current_jalali_datetime()
+    new_row = [date_str, weekday_str, time_str, "", "", ""]
+    worksheet.append_row(new_row, value_input_option='USER_ENTERED')
+    await message.answer(f"✅ Check-in recorded at {time_str}.")
+
+@router.message(F.text == "🏁 Check Out")
+async def handle_check_out(message: types.Message, state: FSMContext):
+    all_records = worksheet.get_all_values()
+    row_to_update_index = -1
+    for i in range(len(all_records) - 1, 0, -1):
+        if len(all_records[i]) > 3 and all_records[i][3] == "":
+            row_to_update_index = i
+            break
+    if row_to_update_index == -1:
+        await message.answer("⚠️ You need to check in first!")
+        return
+        
+    row_number = row_to_update_index + 1
+    _, time_str, _ = get_current_jalali_datetime()
+    worksheet.update_cell(row_number, 4, time_str) # Update check-out
+
+    # Calculate and update duration
+    time_in_str = all_records[row_to_update_index][2]
+    FMT = "%I:%M:%S %p"
+    duration = datetime.strptime(time_str, FMT) - datetime.strptime(time_in_str, FMT)
+    duration_str = str(duration).split('.')[0] # Format as HH:MM:SS
+    worksheet.update_cell(row_number, 5, duration_str) # Update total hours
     
-    if message.text == "⏰ Check In":
-        weekday = get_persian_weekday(now)
-        sheet.append_row([
-            persian_date,   # تاریخ
-            weekday,        # روز هفته
-            current_time,   # زمان ورود
-            "",            # زمان خروج
-            "",            # کل ساعات کاری
-            ""            # فعالیت
-        ])
-        await message.answer(f"Check-in time recorded: {current_time}")
-        logger.info("Check-in recorded: %s", current_time)
-        
-    elif message.text == "🏁 Check Out":
-        all_records = sheet.get_all_values()
-        for i in range(len(all_records)-1, -1, -1):
-            if all_records[i][3] == "":  # Find last row without check-out time
-                row_number = i + 1
-                sheet.update_cell(row_number, 4, current_time)
-                
-                # Calculate total work hours
-                try:
-                    time_in = datetime.strptime(all_records[i][2], "%I:%M:%S %p")
-                    time_out = datetime.strptime(current_time, "%I:%M:%S %p")
-                    if time_out < time_in:  # If passed midnight
-                        time_out = time_out.replace(day=time_out.day + 1)
-                    total_hours = time_out - time_in
-                    total_hours_str = f"{total_hours.seconds // 3600}:{(total_hours.seconds // 60) % 60:02d}:00"
-                    sheet.update_cell(row_number, 5, total_hours_str)
-                    
-                    # Store times for summary
-                    await state.update_data(
-                        row_number=row_number,
-                        start_time=all_records[i][2],
-                        end_time=current_time,
-                        total_hours=total_hours_str
-                    )
-                except Exception as e:
-                    logger.error("Error calculating total hours: %s", e)
-                
-                await message.answer(f"Check-out time recorded: {current_time}\nPlease enter your activity or skip for skip:")
-                await state.set_state(ActivityState.waiting_for_activity)
-                logger.info("FSM state changed to waiting for activity. row_number=%s", row_number)
-                break
-        else:
-            await message.answer("You need to check in first!")
+    await state.update_data(row_number=row_number)
+    await state.set_state(ActivityState.waiting_for_activity)
+    await message.answer(f"✅ Check-out recorded at {time_str}.\n\nPlease enter your activity for this session (or type skip).")
 
+@router.message(ActivityState.waiting_for_activity)
+async def process_activity(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    row_number = data.get("row_number")
+    
+    if message.text.lower() != 'skip':
+        activity = message.text
+        worksheet.update_cell(row_number, 6, activity)
+        await message.answer("Activity recorded.", reply_markup=main_keyboard)
+    else:
+        await message.answer("Activity skipped.", reply_markup=main_keyboard)
+
+    await state.clear()
+    # Show updated stats automatically after finishing a session
+    await cmd_stats(message)
+
+# --- 6. Main Execution ---
 async def main():
+    bot = Bot(token=BOT_TOKEN)
+    storage = MemoryStorage()
+    dp = Dispatcher(storage=storage)
+    dp.include_router(router)
+    
+    await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
-if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+if name == "main":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logging.info("Bot stopped by admin.")
