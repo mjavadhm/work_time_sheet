@@ -59,7 +59,7 @@ def get_persian_weekday(date):
 def format_time(time_obj):
     return time_obj.strftime("%I:%M:%S %p")
 
-def calculate_monthly_stats(sheet, current_month, hourly_rate=55000):
+def calculate_monthly_stats(sheet, current_month, hourly_rate=70000):
     all_records = sheet.get_all_values()
     total_minutes = 0
     worked_days = set()  # Track unique days worked
@@ -263,9 +263,12 @@ async def process_activity(message: types.Message, state: FSMContext):
         end_time = data.get("end_time")
         total_hours = data.get("total_hours")
         
-        activity = message.text
-        sheet = get_sheet()
-        sheet.update_cell(row_number, 6, activity)
+        if message.text != "skip":
+            activity = message.text
+            sheet = get_sheet()
+            sheet.update_cell(row_number, 6, activity)
+        else:
+            activity = "No activity specified"
         
         # Get current month's total hours
         now = datetime.now(iran_tz)
@@ -277,13 +280,13 @@ async def process_activity(message: types.Message, state: FSMContext):
             f"Start Time: {start_time}\n"
             f"End Time: {end_time}\n"
             f"Session Duration: {total_hours}\n"
-            f"Total Hours This Month: {monthly_total}"
         )
         # calculate_monthly_stats(sheet,)
         await message.answer(summary)
         
         logger.info("Activity '%s' recorded in row %s", activity, row_number)
         await state.clear()
+        await cmd_stats(message)
     except Exception as e:
         logger.error("Error processing activity: %s", e)
 
@@ -335,7 +338,7 @@ async def handle_time_logging(message: types.Message, state: FSMContext):
                 except Exception as e:
                     logger.error("Error calculating total hours: %s", e)
                 
-                await message.answer(f"Check-out time recorded: {current_time}\nPlease enter your activity:")
+                await message.answer(f"Check-out time recorded: {current_time}\nPlease enter your activity or skip for skip:")
                 await state.set_state(ActivityState.waiting_for_activity)
                 logger.info("FSM state changed to waiting for activity. row_number=%s", row_number)
                 break
