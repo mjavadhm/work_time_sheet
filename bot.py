@@ -193,8 +193,8 @@ async def handle_check_out(message: types.Message, state: FSMContext):
         # Check if row has a check-in (column C) but is missing a check-out (column D)
 
     if len(row) > 2 and row[2] and (len(row) < 4 or not row[3]):
-            row_to_update_index = i
-            break
+        row_to_update_index = i
+        
             
     if row_to_update_index == -1:
         await message.answer("⚠️ You need to check in first!")
